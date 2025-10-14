@@ -10,14 +10,24 @@ import VirtualControls from '../components/VirtualControls';
 import HUD from '../components/HUD';
 import PauseMenu from '../components/PauseMenu';
 import LevelStartCard from '../components/LevelStartCard';
+import { 
+  DodgeTrail, 
+  JumpParticles, 
+  BlockShield, 
+  DodgeIndicator,
+  MovementStateIndicator 
+} from '../components/MovementEffects';
 import { Player, Enemy, HitEffect, DamageNumber } from '../types/game';
 import { checkCircleCollision, getDistance } from '../utils/collision';
+import { 
+  PhysicsEngine, 
+  PHYSICS_CONSTANTS, 
+  MovementState,
+  createDefaultMovementState 
+} from '../utils/physics';
 
 const { width, height } = Dimensions.get('window');
-
-const GRAVITY = 0.8;
-const JUMP_FORCE = -15;
-const MOVE_SPEED = 5;
+const GROUND_Y = height - 200;
 const PLAYER_SIZE = 60;
 const ENEMY_SIZE = 60;
 
@@ -31,7 +41,7 @@ export default function GameScreen() {
   const [player, setPlayer] = useState<Player>({
     id: 'player',
     x: 150,
-    y: height - 200,
+    y: GROUND_Y,
     width: PLAYER_SIZE,
     height: PLAYER_SIZE,
     health: 100,
@@ -50,18 +60,26 @@ export default function GameScreen() {
     facingRight: true,
   });
 
-  // Enemies state
+  // Movement state
+  const [movementState, setMovementState] = useState<MovementState>(createDefaultMovementState());
+
+  // Visual effects
+  const [dodgeTrails, setDodgeTrails] = useState<Array<{id: string; x: number; y: number; timestamp: number}>>([]);
+  const [jumpParticles, setJumpParticles] = useState<Array<{id: string; x: number; y: number; isDouble: boolean; timestamp: number}>>([]);
+  const [showPerfectParry, setShowPerfectParry] = useState(false);
+
+  // Game state
   const [enemies, setEnemies] = useState<Enemy[]>([]);
   const [hitEffects, setHitEffects] = useState<HitEffect[]>([]);
   const [damageNumbers, setDamageNumbers] = useState<DamageNumber[]>([]);
-  
   const [showTutorial, setShowTutorial] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
   const [showLevelStart, setShowLevelStart] = useState(true);
-  
+
+  // Input tracking
+  const jumpHeldRef = useRef(false);
+  const moveDirectionRef = useRef<'left' | 'right' | null>(null);
   const gameLoopRef = useRef<NodeJS.Timeout>();
-  const jumpPressedRef = useRef(false);
-  const doubleJumpAvailableRef = useRef(false);
 
   // Initialize enemies
   useEffect(() => {
@@ -72,7 +90,7 @@ export default function GameScreen() {
       newEnemies.push({
         id: `enemy-${i}`,
         x: width - 200 - (i * 80),
-        y: height - 200 - (i * 20),
+        y: GROUND_Y,
         width: ENEMY_SIZE,
         height: ENEMY_SIZE,
         health: 30,
@@ -108,83 +126,183 @@ export default function GameScreen() {
     if (isPaused || showLevelStart) return;
 
     gameLoopRef.current = setInterval(() => {
+      const now = Date.now();
+
       // Update player physics
       setPlayer(prev => {
         let newPlayer = { ...prev };
-        
-        // Apply gravity
-        newPlayer.velocityY += GRAVITY;
-        newPlayer.y += newPlayer.velocityY;
-        
-        // Ground collision
-        const groundY = height - 200;
-        if (newPlayer.y >= groundY) {
-          newPlayer.y = groundY;
-          newPlayer.velocityY = 0;
-          newPlayer.isJumping = false;
-          doubleJumpAvailableRef.current = false;
+        let physicsBody = {
+          x: prev.x,
+          y: prev.y,
+          velocityX: prev.velocityX,
+          velocityY: prev.velocityY,
+          accelerationX: 0,
+          accelerationY: 0,
+          mass: 1,
+          friction: 0.85,
+          restitution: 0,
+        };
+
+        // Check if grounded
+        const wasGrounded = movementState.isGrounded;
+        const isGrounded = PhysicsEngine.checkGroundCollision(physicsBody.y, GROUND_Y);
+
+        if (isGrounded && !wasGrounded) {
+          // Just landed
+          setMovementState(ms => ({
+            ...ms,
+            isGrounded: true,
+            isJumping: false,
+            isFalling: false,
+            canDoubleJump: false,
+            lastGroundedTime: now,
+          }));
+        } else if (!isGrounded && wasGrounded) {
+          // Just left ground
+          setMovementState(ms => ({
+            ...ms,
+            isGrounded: false,
+            coyoteTimeRemaining: PHYSICS_CONSTANTS.COYOTE_TIME,
+          }));
         }
-        
-        // Horizontal movement
-        newPlayer.x += newPlayer.velocityX;
-        newPlayer.x = Math.max(50, Math.min(width - 100, newPlayer.x));
-        
+
+        // Apply gravity
+        if (!isGrounded) {
+          physicsBody = PhysicsEngine.applyGravity(physicsBody);
+        }
+
+        // Apply friction
+        physicsBody = PhysicsEngine.applyFriction(physicsBody, isGrounded);
+
+        // Apply movement input
+        if (moveDirectionRef.current && !prev.isDodging) {
+          physicsBody = PhysicsEngine.handleMove(physicsBody, moveDirectionRef.current, isGrounded);
+          newPlayer.facingRight = moveDirectionRef.current === 'right';
+        }
+
+        // Variable jump height
+        if (!jumpHeldRef.current && physicsBody.velocityY < 0) {
+          physicsBody = PhysicsEngine.handleVariableJump(physicsBody, false);
+        }
+
+        // Update position
+        physicsBody = PhysicsEngine.updatePosition(physicsBody);
+
+        // Ground collision
+        if (PhysicsEngine.checkGroundCollision(physicsBody.y, GROUND_Y)) {
+          physicsBody = PhysicsEngine.resolveGroundCollision(physicsBody, GROUND_Y);
+        }
+
+        // Clamp to screen bounds
+        physicsBody = PhysicsEngine.clampPosition(physicsBody, 50, width - 100, 0, height);
+
+        // Update player with new physics
+        newPlayer.x = physicsBody.x;
+        newPlayer.y = physicsBody.y;
+        newPlayer.velocityX = physicsBody.velocityX;
+        newPlayer.velocityY = physicsBody.velocityY;
+
+        // Update movement flags
+        if (physicsBody.velocityY > 1) {
+          setMovementState(ms => ({ ...ms, isFalling: true, isJumping: false }));
+        }
+
         // Cooldowns
         if (newPlayer.attackCooldown > 0) {
           newPlayer.attackCooldown--;
+          if (newPlayer.attackCooldown === 0) {
+            newPlayer.isAttacking = false;
+          }
         }
-        if (newPlayer.attackCooldown === 0) {
-          newPlayer.isAttacking = false;
-        }
-        
+
         return newPlayer;
       });
 
-      // Update enemies
+      // Update movement state timers
+      setMovementState(prev => {
+        const updated = { ...prev };
+        
+        if (updated.coyoteTimeRemaining > 0) {
+          updated.coyoteTimeRemaining = Math.max(0, updated.coyoteTimeRemaining - 16);
+        }
+        
+        if (updated.jumpBufferRemaining > 0) {
+          updated.jumpBufferRemaining = Math.max(0, updated.jumpBufferRemaining - 16);
+        }
+        
+        if (updated.dodgeCooldownRemaining > 0) {
+          updated.dodgeCooldownRemaining = Math.max(0, updated.dodgeCooldownRemaining - 16);
+        }
+
+        if (updated.blockCooldownRemaining > 0) {
+          updated.blockCooldownRemaining = Math.max(0, updated.blockCooldownRemaining - 16);
+        }
+        
+        return updated;
+      });
+
+      // Update enemies (same as before)
       setEnemies(prev => prev.map(enemy => {
         if (!enemy.isAlive) return enemy;
         
         let updated = { ...enemy };
         const distanceToPlayer = getDistance(enemy.x, enemy.y, player.x, player.y);
         
-        // Simple AI
         if (distanceToPlayer < 300) {
-          // Chase player
           updated.aiState = 'chase';
           const direction = player.x > enemy.x ? 1 : -1;
           updated.velocityX = direction * updated.speed;
           updated.x += updated.velocityX;
           
-          // Attack if in range
           if (distanceToPlayer < updated.attackRange && updated.attackCooldown === 0) {
             updated.aiState = 'attack';
             updated.isAttacking = true;
             updated.attackCooldown = updated.attackSpeed;
             
-            // Deal damage to player
-            if (!player.isDodging && !player.isBlocking) {
+            // Check if player is blocking
+            const isBlocking = player.isBlocking;
+            const isPerfectBlock = isBlocking && movementState.blockCooldownRemaining > (PHYSICS_CONSTANTS.BLOCK_DURATION - PHYSICS_CONSTANTS.PARRY_WINDOW);
+            
+            if (player.isDodging) {
+              // Dodge - no damage
+            } else if (isPerfectBlock) {
+              // Perfect parry!
+              setShowPerfectParry(true);
+              setTimeout(() => setShowPerfectParry(false), 200);
+              addHitEffect(player.x, player.y, 'block');
+              // Stun enemy briefly
+              updated.attackCooldown = updated.attackSpeed * 2;
+            } else if (isBlocking) {
+              // Normal block - reduced damage
+              setPlayer(p => {
+                const reducedDmg = Math.floor(updated.damage * 0.3);
+                const newPlayer = { ...p };
+                if (newPlayer.armor > 0) {
+                  newPlayer.armor = Math.max(0, newPlayer.armor - reducedDmg);
+                } else {
+                  newPlayer.health = Math.max(0, newPlayer.health - reducedDmg);
+                }
+                addDamageNumber(p.x, p.y - 30, reducedDmg);
+                addHitEffect(p.x, p.y, 'block');
+                return newPlayer;
+              });
+            } else {
+              // Full damage
               setPlayer(p => {
                 const dmg = updated.damage;
                 const newPlayer = { ...p };
-                
                 if (newPlayer.armor > 0) {
                   newPlayer.armor = Math.max(0, newPlayer.armor - dmg);
                 } else {
                   newPlayer.health = Math.max(0, newPlayer.health - dmg);
                 }
-                
-                // Add damage number
                 addDamageNumber(p.x, p.y - 30, dmg);
                 addHitEffect(p.x, p.y, 'hit');
-                
                 return newPlayer;
               });
-            } else if (player.isBlocking) {
-              addHitEffect(player.x, player.y, 'block');
             }
           }
         } else {
-          // Patrol
           updated.aiState = 'patrol';
           if (!updated.patrolPoint) {
             updated.patrolPoint = enemy.x + (Math.random() * 200 - 100);
@@ -199,36 +317,36 @@ export default function GameScreen() {
           }
         }
         
-        // Cooldowns
         if (updated.attackCooldown > 0) {
           updated.attackCooldown--;
-        }
-        if (updated.attackCooldown === 0) {
-          updated.isAttacking = false;
+          if (updated.attackCooldown === 0) {
+            updated.isAttacking = false;
+          }
         }
         
         return updated;
       }));
 
       // Clean up effects
-      setHitEffects(prev => prev.filter(effect => Date.now() - effect.timestamp < 300));
-      setDamageNumbers(prev => prev.filter(dmg => Date.now() - dmg.timestamp < 1000));
+      setHitEffects(prev => prev.filter(effect => now - effect.timestamp < 300));
+      setDamageNumbers(prev => prev.filter(dmg => now - dmg.timestamp < 1000));
+      setDodgeTrails(prev => prev.filter(trail => now - trail.timestamp < 250));
+      setJumpParticles(prev => prev.filter(p => now - p.timestamp < 400));
       
-      // Update damage numbers position
       setDamageNumbers(prev => prev.map(dmg => ({
         ...dmg,
         y: dmg.y + dmg.velocityY,
         velocityY: dmg.velocityY - 0.5,
       })));
 
-    }, 1000 / 60); // 60 FPS
+    }, 1000 / 60);
 
     return () => {
       if (gameLoopRef.current) clearInterval(gameLoopRef.current);
     };
-  }, [isPaused, showLevelStart, player.x, player.y]);
+  }, [isPaused, showLevelStart, player.x, player.y, movementState]);
 
-  // Check win condition
+  // Win/lose conditions
   useEffect(() => {
     const aliveEnemies = enemies.filter(e => e.isAlive).length;
     if (aliveEnemies === 0 && enemies.length > 0) {
@@ -236,7 +354,6 @@ export default function GameScreen() {
     }
   }, [enemies]);
 
-  // Check lose condition
   useEffect(() => {
     if (player.health <= 0) {
       setTimeout(() => {
@@ -249,9 +366,7 @@ export default function GameScreen() {
   const addHitEffect = (x: number, y: number, type: 'hit' | 'critical' | 'block') => {
     setHitEffects(prev => [...prev, {
       id: `hit-${Date.now()}-${Math.random()}`,
-      x,
-      y,
-      type,
+      x, y, type,
       timestamp: Date.now(),
     }]);
   };
@@ -259,57 +374,81 @@ export default function GameScreen() {
   const addDamageNumber = (x: number, y: number, damage: number) => {
     setDamageNumbers(prev => [...prev, {
       id: `dmg-${Date.now()}-${Math.random()}`,
-      x,
-      y,
-      damage,
+      x, y, damage,
       timestamp: Date.now(),
       velocityY: -2,
     }]);
   };
 
   const handleMove = (direction: 'left' | 'right' | 'up' | 'down') => {
-    setPlayer(prev => {
-      const newPlayer = { ...prev };
-      
-      if (direction === 'left') {
-        newPlayer.velocityX = -MOVE_SPEED;
-        newPlayer.facingRight = false;
-      } else if (direction === 'right') {
-        newPlayer.velocityX = MOVE_SPEED;
-        newPlayer.facingRight = true;
-      } else if (direction === 'up' || direction === 'down') {
-        // Handled by jump
-      }
-      
-      return newPlayer;
-    });
+    if (direction === 'left' || direction === 'right') {
+      moveDirectionRef.current = direction;
+    }
+  };
 
-    // Stop movement when releasing
-    setTimeout(() => {
-      setPlayer(prev => ({ ...prev, velocityX: 0 }));
-    }, 100);
+  const handleMoveRelease = () => {
+    moveDirectionRef.current = null;
   };
 
   const handleJump = () => {
-    if (jumpPressedRef.current) return;
-    jumpPressedRef.current = true;
+    jumpHeldRef.current = true;
+    
+    setMovementState(prev => ({
+      ...prev,
+      lastJumpPressTime: Date.now(),
+      jumpBufferRemaining: PHYSICS_CONSTANTS.JUMP_BUFFER,
+    }));
 
-    setPlayer(prev => {
-      if (!prev.isJumping) {
-        // First jump
-        doubleJumpAvailableRef.current = true;
-        return { ...prev, velocityY: JUMP_FORCE, isJumping: true };
-      } else if (doubleJumpAvailableRef.current && state.currentLevel >= 3) {
-        // Double jump (unlocked from level 3)
-        doubleJumpAvailableRef.current = false;
-        return { ...prev, velocityY: JUMP_FORCE * 0.8 };
-      }
-      return prev;
-    });
+    const canCoyoteJump = movementState.coyoteTimeRemaining > 0;
+    const canDoubleJump = movementState.canDoubleJump && state.currentLevel >= 3;
+
+    if (movementState.isGrounded || canCoyoteJump) {
+      // Regular jump
+      setPlayer(prev => ({
+        ...prev,
+        velocityY: PHYSICS_CONSTANTS.JUMP_FORCE,
+        isJumping: true,
+      }));
+
+      setMovementState(prev => ({
+        ...prev,
+        isGrounded: false,
+        isJumping: true,
+        canDoubleJump: true,
+        coyoteTimeRemaining: 0,
+      }));
+
+      setJumpParticles(prev => [...prev, {
+        id: `jump-${Date.now()}`,
+        x: player.x,
+        y: player.y,
+        isDouble: false,
+        timestamp: Date.now(),
+      }]);
+    } else if (canDoubleJump) {
+      // Double jump
+      setPlayer(prev => ({
+        ...prev,
+        velocityY: PHYSICS_CONSTANTS.DOUBLE_JUMP_FORCE,
+      }));
+
+      setMovementState(prev => ({
+        ...prev,
+        canDoubleJump: false,
+      }));
+
+      setJumpParticles(prev => [...prev, {
+        id: `doublejump-${Date.now()}`,
+        x: player.x,
+        y: player.y,
+        isDouble: true,
+        timestamp: Date.now(),
+      }]);
+    }
 
     setTimeout(() => {
-      jumpPressedRef.current = false;
-    }, 200);
+      jumpHeldRef.current = false;
+    }, 150);
   };
 
   const handleAttack = () => {
@@ -318,15 +457,13 @@ export default function GameScreen() {
     setPlayer(prev => ({
       ...prev,
       isAttacking: true,
-      attackCooldown: 30, // 0.5 seconds at 60fps
+      attackCooldown: 30,
     }));
 
-    // Consume ammo for guns
     if (selectedWeapon && selectedWeapon.ammo > 0) {
       setPlayer(prev => ({ ...prev, ammo: Math.max(0, prev.ammo - 1) }));
     }
 
-    // Check collision with enemies
     const attackRange = selectedWeapon?.range ? selectedWeapon.range * 15 : 70;
     const attackX = player.facingRight ? player.x + PLAYER_SIZE : player.x - attackRange;
     
@@ -357,23 +494,57 @@ export default function GameScreen() {
   };
 
   const handleDodge = () => {
+    if (movementState.dodgeCooldownRemaining > 0) return;
+
+    const direction = player.facingRight ? 'right' : 'left';
+    
     setPlayer(prev => ({
       ...prev,
       isDodging: true,
-      velocityX: prev.facingRight ? 10 : -10,
+      velocityX: PHYSICS_CONSTANTS.DODGE_SPEED * (direction === 'right' ? 1 : -1),
     }));
+
+    setMovementState(prev => ({
+      ...prev,
+      isDodging: true,
+      dodgeCooldownRemaining: PHYSICS_CONSTANTS.DODGE_COOLDOWN,
+    }));
+
+    // Add dodge trails
+    for (let i = 0; i < 3; i++) {
+      setTimeout(() => {
+        setDodgeTrails(prev => [...prev, {
+          id: `trail-${Date.now()}-${i}`,
+          x: player.x,
+          y: player.y,
+          timestamp: Date.now(),
+        }]);
+      }, i * 50);
+    }
 
     setTimeout(() => {
       setPlayer(prev => ({ ...prev, isDodging: false, velocityX: 0 }));
-    }, 200);
+      setMovementState(prev => ({ ...prev, isDodging: false }));
+    }, PHYSICS_CONSTANTS.DODGE_DURATION);
   };
 
   const handleBlock = () => {
+    if (movementState.blockCooldownRemaining > 0) return;
+
     setPlayer(prev => ({ ...prev, isBlocking: true }));
+    setMovementState(prev => ({
+      ...prev,
+      isBlocking: true,
+      blockCooldownRemaining: PHYSICS_CONSTANTS.BLOCK_DURATION,
+    }));
+
     setTimeout(() => {
       setPlayer(prev => ({ ...prev, isBlocking: false }));
-    }, 100);
+      setMovementState(prev => ({ ...prev, isBlocking: false }));
+    }, PHYSICS_CONSTANTS.BLOCK_DURATION);
   };
+
+  const dodgeCooldownPercent = (movementState.dodgeCooldownRemaining / PHYSICS_CONSTANTS.DODGE_COOLDOWN) * 100;
 
   return (
     <LinearGradient colors={['#1a1a2e', '#16213e', '#0f3460']} style={styles.container}>
@@ -389,6 +560,15 @@ export default function GameScreen() {
         showArmor={state.currentLevel >= 4}
       />
 
+      <MovementStateIndicator
+        isJumping={movementState.isJumping}
+        isDodging={movementState.isDodging}
+        isBlocking={movementState.isBlocking}
+        canDoubleJump={movementState.canDoubleJump}
+      />
+
+      <DodgeIndicator cooldownPercent={100 - dodgeCooldownPercent} visible={dodgeCooldownPercent > 0} />
+
       {showTutorial && currentLevel?.tutorial && (
         <View style={styles.tutorialBox}>
           <Text style={styles.tutorialText}>{currentLevel.tutorial}</Text>
@@ -396,6 +576,28 @@ export default function GameScreen() {
       )}
 
       <View style={styles.arena}>
+        {/* Dodge trails */}
+        {dodgeTrails.map(trail => (
+          <DodgeTrail
+            key={trail.id}
+            x={trail.x}
+            y={trail.y}
+            color={state.customization.bodyColor}
+            visible={true}
+          />
+        ))}
+
+        {/* Jump particles */}
+        {jumpParticles.map(particles => (
+          <JumpParticles
+            key={particles.id}
+            x={particles.x}
+            y={particles.y}
+            visible={true}
+            isDoubleJump={particles.isDouble}
+          />
+        ))}
+
         {/* Player */}
         <View style={[styles.entity, { left: player.x, top: player.y }]}>
           <StickFigure
@@ -406,18 +608,18 @@ export default function GameScreen() {
             longHair={state.customization.longHair}
             size={PLAYER_SIZE}
           />
-          {player.isBlocking && (
-            <View style={styles.blockEffect}>
-              <Text style={styles.blockText}>🛡️</Text>
-            </View>
-          )}
+          <BlockShield
+            x={player.x}
+            y={player.y}
+            visible={player.isBlocking}
+            isPerfectParry={showPerfectParry}
+          />
         </View>
 
         {/* Enemies */}
         {enemies.map(enemy => enemy.isAlive && (
           <View key={enemy.id} style={[styles.entity, { left: enemy.x, top: enemy.y }]}>
             <StickFigure size={ENEMY_SIZE} isEnemy />
-            {/* Health bar */}
             <View style={styles.healthBarBg}>
               <View 
                 style={[
@@ -471,22 +673,40 @@ export default function GameScreen() {
         visible={isPaused}
         onResume={() => setIsPaused(false)}
         onRestart={() => {
-          setPlayer(prev => ({
-            ...prev,
-            health: 100,
-            armor: state.currentLevel >= 4 ? 50 : 0,
+          // Reset player
+          setPlayer({
+            id: 'player',
             x: 150,
-            y: height - 200,
+            y: GROUND_Y,
+            width: PLAYER_SIZE,
+            height: PLAYER_SIZE,
+            health: 100,
+            maxHealth: 100,
+            armor: state.currentLevel >= 4 ? 50 : 0,
+            maxArmor: 50,
+            ammo: selectedWeapon?.ammo || -1,
+            isAlive: true,
             velocityX: 0,
             velocityY: 0,
-          }));
+            isJumping: false,
+            isAttacking: false,
+            attackCooldown: 0,
+            isDodging: false,
+            isBlocking: false,
+            facingRight: true,
+          });
+          
+          // Reset movement state
+          setMovementState(createDefaultMovementState());
+          
+          // Reset enemies
           const enemyCount = currentLevel?.enemies || 1;
           const newEnemies: Enemy[] = [];
           for (let i = 0; i < enemyCount; i++) {
             newEnemies.push({
               id: `enemy-${i}`,
               x: width - 200 - (i * 80),
-              y: height - 200 - (i * 20),
+              y: GROUND_Y,
               width: ENEMY_SIZE,
               height: ENEMY_SIZE,
               health: 30,
@@ -553,14 +773,6 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: -20,
     fontSize: 20,
-  },
-  blockEffect: {
-    position: 'absolute',
-    top: -10,
-    left: -10,
-  },
-  blockText: {
-    fontSize: 24,
   },
   hitEffect: {
     position: 'absolute',
