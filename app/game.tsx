@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, Dimensions } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,16 +10,8 @@ import VirtualControls from '../components/VirtualControls';
 import HUD from '../components/HUD';
 import PauseMenu from '../components/PauseMenu';
 import LevelStartCard from '../components/LevelStartCard';
-import { Player, Enemy, HitEffect, DamageNumber } from '../types/game';
-import { checkCircleCollision, getDistance } from '../utils/collision';
 
 const { width, height } = Dimensions.get('window');
-
-const GRAVITY = 0.8;
-const JUMP_FORCE = -15;
-const MOVE_SPEED = 5;
-const PLAYER_SIZE = 60;
-const ENEMY_SIZE = 60;
 
 export default function GameScreen() {
   const router = useRouter();
@@ -27,75 +19,15 @@ export default function GameScreen() {
   const currentLevel = LEVELS[state.currentLevel - 1];
   const selectedWeapon = WEAPONS.find(w => w.id === state.selectedWeapon);
 
-  // Player state
-  const [player, setPlayer] = useState<Player>({
-    id: 'player',
-    x: 150,
-    y: height - 200,
-    width: PLAYER_SIZE,
-    height: PLAYER_SIZE,
-    health: 100,
-    maxHealth: 100,
-    armor: state.currentLevel >= 4 ? 50 : 0,
-    maxArmor: 50,
-    ammo: selectedWeapon?.ammo || -1,
-    isAlive: true,
-    velocityX: 0,
-    velocityY: 0,
-    isJumping: false,
-    isAttacking: false,
-    attackCooldown: 0,
-    isDodging: false,
-    isBlocking: false,
-    facingRight: true,
-  });
-
-  // Enemies state
-  const [enemies, setEnemies] = useState<Enemy[]>([]);
-  const [hitEffects, setHitEffects] = useState<HitEffect[]>([]);
-  const [damageNumbers, setDamageNumbers] = useState<DamageNumber[]>([]);
-  
+  const [health, setHealth] = useState(100);
+  const [armor, setArmor] = useState(state.currentLevel >= 4 ? 50 : 0);
+  const [ammo, setAmmo] = useState(selectedWeapon?.ammo || -1);
+  const [enemiesLeft, setEnemiesLeft] = useState(currentLevel?.enemies || 1);
+  const [playerPos, setPlayerPos] = useState({ x: 100, y: height / 2 });
   const [showTutorial, setShowTutorial] = useState(true);
   const [isPaused, setIsPaused] = useState(false);
   const [showLevelStart, setShowLevelStart] = useState(true);
-  
-  const gameLoopRef = useRef<NodeJS.Timeout>();
-  const jumpPressedRef = useRef(false);
-  const doubleJumpAvailableRef = useRef(false);
 
-  // Initialize enemies
-  useEffect(() => {
-    const enemyCount = currentLevel?.enemies || 1;
-    const newEnemies: Enemy[] = [];
-    
-    for (let i = 0; i < enemyCount; i++) {
-      newEnemies.push({
-        id: `enemy-${i}`,
-        x: width - 200 - (i * 80),
-        y: height - 200 - (i * 20),
-        width: ENEMY_SIZE,
-        height: ENEMY_SIZE,
-        health: 30,
-        maxHealth: 30,
-        isAlive: true,
-        type: 'grunt',
-        velocityX: 0,
-        velocityY: 0,
-        isAttacking: false,
-        attackCooldown: 0,
-        aiState: 'patrol',
-        patrolPoint: Math.random() * 200,
-        damage: 10,
-        attackRange: 80,
-        speed: 2,
-        attackSpeed: 60,
-      });
-    }
-    
-    setEnemies(newEnemies);
-  }, [currentLevel]);
-
-  // Tutorial timer
   useEffect(() => {
     if (showTutorial && currentLevel?.tutorial) {
       const timer = setTimeout(() => setShowTutorial(false), 5000);
@@ -103,288 +35,42 @@ export default function GameScreen() {
     }
   }, [showTutorial]);
 
-  // Main game loop
   useEffect(() => {
-    if (isPaused || showLevelStart) return;
-
-    gameLoopRef.current = setInterval(() => {
-      // Update player physics
-      setPlayer(prev => {
-        let newPlayer = { ...prev };
-        
-        // Apply gravity
-        newPlayer.velocityY += GRAVITY;
-        newPlayer.y += newPlayer.velocityY;
-        
-        // Ground collision
-        const groundY = height - 200;
-        if (newPlayer.y >= groundY) {
-          newPlayer.y = groundY;
-          newPlayer.velocityY = 0;
-          newPlayer.isJumping = false;
-          doubleJumpAvailableRef.current = false;
-        }
-        
-        // Horizontal movement
-        newPlayer.x += newPlayer.velocityX;
-        newPlayer.x = Math.max(50, Math.min(width - 100, newPlayer.x));
-        
-        // Cooldowns
-        if (newPlayer.attackCooldown > 0) {
-          newPlayer.attackCooldown--;
-        }
-        if (newPlayer.attackCooldown === 0) {
-          newPlayer.isAttacking = false;
-        }
-        
-        return newPlayer;
-      });
-
-      // Update enemies
-      setEnemies(prev => prev.map(enemy => {
-        if (!enemy.isAlive) return enemy;
-        
-        let updated = { ...enemy };
-        const distanceToPlayer = getDistance(enemy.x, enemy.y, player.x, player.y);
-        
-        // Simple AI
-        if (distanceToPlayer < 300) {
-          // Chase player
-          updated.aiState = 'chase';
-          const direction = player.x > enemy.x ? 1 : -1;
-          updated.velocityX = direction * updated.speed;
-          updated.x += updated.velocityX;
-          
-          // Attack if in range
-          if (distanceToPlayer < updated.attackRange && updated.attackCooldown === 0) {
-            updated.aiState = 'attack';
-            updated.isAttacking = true;
-            updated.attackCooldown = updated.attackSpeed;
-            
-            // Deal damage to player
-            if (!player.isDodging && !player.isBlocking) {
-              setPlayer(p => {
-                const dmg = updated.damage;
-                const newPlayer = { ...p };
-                
-                if (newPlayer.armor > 0) {
-                  newPlayer.armor = Math.max(0, newPlayer.armor - dmg);
-                } else {
-                  newPlayer.health = Math.max(0, newPlayer.health - dmg);
-                }
-                
-                // Add damage number
-                addDamageNumber(p.x, p.y - 30, dmg);
-                addHitEffect(p.x, p.y, 'hit');
-                
-                return newPlayer;
-              });
-            } else if (player.isBlocking) {
-              addHitEffect(player.x, player.y, 'block');
-            }
-          }
-        } else {
-          // Patrol
-          updated.aiState = 'patrol';
-          if (!updated.patrolPoint) {
-            updated.patrolPoint = enemy.x + (Math.random() * 200 - 100);
-          }
-          
-          const toPatrol = updated.patrolPoint - updated.x;
-          if (Math.abs(toPatrol) > 5) {
-            updated.velocityX = toPatrol > 0 ? 1 : -1;
-            updated.x += updated.velocityX;
-          } else {
-            updated.patrolPoint = enemy.x + (Math.random() * 200 - 100);
-          }
-        }
-        
-        // Cooldowns
-        if (updated.attackCooldown > 0) {
-          updated.attackCooldown--;
-        }
-        if (updated.attackCooldown === 0) {
-          updated.isAttacking = false;
-        }
-        
-        return updated;
-      }));
-
-      // Clean up effects
-      setHitEffects(prev => prev.filter(effect => Date.now() - effect.timestamp < 300));
-      setDamageNumbers(prev => prev.filter(dmg => Date.now() - dmg.timestamp < 1000));
-      
-      // Update damage numbers position
-      setDamageNumbers(prev => prev.map(dmg => ({
-        ...dmg,
-        y: dmg.y + dmg.velocityY,
-        velocityY: dmg.velocityY - 0.5,
-      })));
-
-    }, 1000 / 60); // 60 FPS
-
-    return () => {
-      if (gameLoopRef.current) clearInterval(gameLoopRef.current);
-    };
-  }, [isPaused, showLevelStart, player.x, player.y]);
-
-  // Check win condition
-  useEffect(() => {
-    const aliveEnemies = enemies.filter(e => e.isAlive).length;
-    if (aliveEnemies === 0 && enemies.length > 0) {
+    if (enemiesLeft === 0) {
       setTimeout(() => router.push('/results'), 1000);
     }
-  }, [enemies]);
+  }, [enemiesLeft]);
 
-  // Check lose condition
-  useEffect(() => {
-    if (player.health <= 0) {
-      setTimeout(() => {
-        alert('Game Over! Try again.');
-        router.push('/levels');
-      }, 500);
-    }
-  }, [player.health]);
-
-  const addHitEffect = (x: number, y: number, type: 'hit' | 'critical' | 'block') => {
-    setHitEffects(prev => [...prev, {
-      id: `hit-${Date.now()}-${Math.random()}`,
-      x,
-      y,
-      type,
-      timestamp: Date.now(),
-    }]);
-  };
-
-  const addDamageNumber = (x: number, y: number, damage: number) => {
-    setDamageNumbers(prev => [...prev, {
-      id: `dmg-${Date.now()}-${Math.random()}`,
-      x,
-      y,
-      damage,
-      timestamp: Date.now(),
-      velocityY: -2,
-    }]);
-  };
-
-  const handleMove = (direction: 'left' | 'right' | 'up' | 'down') => {
-    setPlayer(prev => {
-      const newPlayer = { ...prev };
-      
-      if (direction === 'left') {
-        newPlayer.velocityX = -MOVE_SPEED;
-        newPlayer.facingRight = false;
-      } else if (direction === 'right') {
-        newPlayer.velocityX = MOVE_SPEED;
-        newPlayer.facingRight = true;
-      } else if (direction === 'up' || direction === 'down') {
-        // Handled by jump
-      }
-      
-      return newPlayer;
-    });
-
-    // Stop movement when releasing
-    setTimeout(() => {
-      setPlayer(prev => ({ ...prev, velocityX: 0 }));
-    }, 100);
-  };
-
-  const handleJump = () => {
-    if (jumpPressedRef.current) return;
-    jumpPressedRef.current = true;
-
-    setPlayer(prev => {
-      if (!prev.isJumping) {
-        // First jump
-        doubleJumpAvailableRef.current = true;
-        return { ...prev, velocityY: JUMP_FORCE, isJumping: true };
-      } else if (doubleJumpAvailableRef.current && state.currentLevel >= 3) {
-        // Double jump (unlocked from level 3)
-        doubleJumpAvailableRef.current = false;
-        return { ...prev, velocityY: JUMP_FORCE * 0.8 };
-      }
+  const handleMove = (direction: string) => {
+    const speed = 10;
+    setPlayerPos(prev => {
+      if (direction === 'left') return { ...prev, x: Math.max(50, prev.x - speed) };
+      if (direction === 'right') return { ...prev, x: Math.min(width - 50, prev.x + speed) };
+      if (direction === 'up') return { ...prev, y: Math.max(100, prev.y - speed) };
+      if (direction === 'down') return { ...prev, y: Math.min(height - 150, prev.y + speed) };
       return prev;
     });
-
-    setTimeout(() => {
-      jumpPressedRef.current = false;
-    }, 200);
   };
 
   const handleAttack = () => {
-    if (player.attackCooldown > 0) return;
-
-    setPlayer(prev => ({
-      ...prev,
-      isAttacking: true,
-      attackCooldown: 30, // 0.5 seconds at 60fps
-    }));
-
-    // Consume ammo for guns
-    if (selectedWeapon && selectedWeapon.ammo > 0) {
-      setPlayer(prev => ({ ...prev, ammo: Math.max(0, prev.ammo - 1) }));
+    if (selectedWeapon && selectedWeapon.ammo > 0 && ammo > 0) {
+      setAmmo(prev => prev - 1);
     }
-
-    // Check collision with enemies
-    const attackRange = selectedWeapon?.range ? selectedWeapon.range * 15 : 70;
-    const attackX = player.facingRight ? player.x + PLAYER_SIZE : player.x - attackRange;
-    
-    setEnemies(prev => prev.map(enemy => {
-      if (!enemy.isAlive) return enemy;
-      
-      const inRange = checkCircleCollision(
-        { x: attackX + attackRange / 2, y: player.y, radius: attackRange / 2 },
-        { x: enemy.x, y: enemy.y, radius: ENEMY_SIZE / 2 }
-      );
-      
-      if (inRange) {
-        const damage = selectedWeapon?.damage || 5;
-        const newHealth = Math.max(0, enemy.health - damage);
-        
-        addHitEffect(enemy.x, enemy.y, damage > 7 ? 'critical' : 'hit');
-        addDamageNumber(enemy.x, enemy.y - 20, damage);
-        
-        return {
-          ...enemy,
-          health: newHealth,
-          isAlive: newHealth > 0,
-        };
-      }
-      
-      return enemy;
-    }));
-  };
-
-  const handleDodge = () => {
-    setPlayer(prev => ({
-      ...prev,
-      isDodging: true,
-      velocityX: prev.facingRight ? 10 : -10,
-    }));
-
-    setTimeout(() => {
-      setPlayer(prev => ({ ...prev, isDodging: false, velocityX: 0 }));
-    }, 200);
-  };
-
-  const handleBlock = () => {
-    setPlayer(prev => ({ ...prev, isBlocking: true }));
-    setTimeout(() => {
-      setPlayer(prev => ({ ...prev, isBlocking: false }));
-    }, 100);
+    if (Math.random() > 0.7) {
+      setEnemiesLeft(prev => Math.max(0, prev - 1));
+    }
   };
 
   return (
     <LinearGradient colors={['#1a1a2e', '#16213e', '#0f3460']} style={styles.container}>
       <HUD
-        health={player.health}
-        maxHealth={player.maxHealth}
-        armor={player.armor}
-        maxArmor={player.maxArmor}
-        ammo={player.ammo}
+        health={health}
+        maxHealth={100}
+        armor={armor}
+        maxArmor={50}
+        ammo={ammo}
         maxAmmo={selectedWeapon?.ammo || -1}
-        enemyCount={enemies.filter(e => e.isAlive).length}
+        enemyCount={enemiesLeft}
         weaponIcon={selectedWeapon?.icon}
         showArmor={state.currentLevel >= 4}
       />
@@ -396,55 +82,20 @@ export default function GameScreen() {
       )}
 
       <View style={styles.arena}>
-        {/* Player */}
-        <View style={[styles.entity, { left: player.x, top: player.y }]}>
+        <View style={[styles.player, { left: playerPos.x, top: playerPos.y }]}>
           <StickFigure
             bodyColor={state.customization.bodyColor}
             armsColor={state.customization.armsColor}
             legsColor={state.customization.legsColor}
             headband={state.customization.headband}
             longHair={state.customization.longHair}
-            size={PLAYER_SIZE}
+            size={80}
           />
-          {player.isBlocking && (
-            <View style={styles.blockEffect}>
-              <Text style={styles.blockText}>🛡️</Text>
-            </View>
-          )}
         </View>
 
-        {/* Enemies */}
-        {enemies.map(enemy => enemy.isAlive && (
-          <View key={enemy.id} style={[styles.entity, { left: enemy.x, top: enemy.y }]}>
-            <StickFigure size={ENEMY_SIZE} isEnemy />
-            {/* Health bar */}
-            <View style={styles.healthBarBg}>
-              <View 
-                style={[
-                  styles.healthBarFill, 
-                  { width: `${(enemy.health / enemy.maxHealth) * 100}%` }
-                ]} 
-              />
-            </View>
-            {enemy.isAttacking && (
-              <Text style={styles.attackIndicator}>⚔️</Text>
-            )}
-          </View>
-        ))}
-
-        {/* Hit effects */}
-        {hitEffects.map(effect => (
-          <View key={effect.id} style={[styles.hitEffect, { left: effect.x, top: effect.y }]}>
-            <Text style={styles.hitEffectText}>
-              {effect.type === 'hit' ? '💥' : effect.type === 'critical' ? '💢' : '🛡️'}
-            </Text>
-          </View>
-        ))}
-
-        {/* Damage numbers */}
-        {damageNumbers.map(dmg => (
-          <View key={dmg.id} style={[styles.damageNumber, { left: dmg.x, top: dmg.y }]}>
-            <Text style={styles.damageText}>-{dmg.damage}</Text>
+        {Array.from({ length: enemiesLeft }).map((_, i) => (
+          <View key={i} style={[styles.enemy, { left: width - 150 - i * 60, top: 200 + i * 40 }]}>
+            <StickFigure size={70} isEnemy />
           </View>
         ))}
       </View>
@@ -452,9 +103,9 @@ export default function GameScreen() {
       <VirtualControls
         onMove={handleMove}
         onAttack={handleAttack}
-        onJump={handleJump}
-        onDodge={handleDodge}
-        onBlock={handleBlock}
+        onJump={() => {}}
+        onDodge={() => {}}
+        onBlock={() => {}}
         onPause={() => setIsPaused(true)}
       />
 
@@ -471,41 +122,9 @@ export default function GameScreen() {
         visible={isPaused}
         onResume={() => setIsPaused(false)}
         onRestart={() => {
-          setPlayer(prev => ({
-            ...prev,
-            health: 100,
-            armor: state.currentLevel >= 4 ? 50 : 0,
-            x: 150,
-            y: height - 200,
-            velocityX: 0,
-            velocityY: 0,
-          }));
-          const enemyCount = currentLevel?.enemies || 1;
-          const newEnemies: Enemy[] = [];
-          for (let i = 0; i < enemyCount; i++) {
-            newEnemies.push({
-              id: `enemy-${i}`,
-              x: width - 200 - (i * 80),
-              y: height - 200 - (i * 20),
-              width: ENEMY_SIZE,
-              height: ENEMY_SIZE,
-              health: 30,
-              maxHealth: 30,
-              isAlive: true,
-              type: 'grunt',
-              velocityX: 0,
-              velocityY: 0,
-              isAttacking: false,
-              attackCooldown: 0,
-              aiState: 'patrol',
-              patrolPoint: Math.random() * 200,
-              damage: 10,
-              attackRange: 80,
-              speed: 2,
-              attackSpeed: 60,
-            });
-          }
-          setEnemies(newEnemies);
+          setHealth(100);
+          setArmor(state.currentLevel >= 4 ? 50 : 0);
+          setEnemiesLeft(currentLevel?.enemies || 1);
           setIsPaused(false);
         }}
         onQuit={() => router.push('/menu')}
@@ -517,7 +136,8 @@ export default function GameScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   arena: { flex: 1, position: 'relative' },
-  entity: { position: 'absolute' },
+  player: { position: 'absolute' },
+  enemy: { position: 'absolute' },
   tutorialBox: { 
     position: 'absolute', 
     top: 100, 
@@ -534,51 +154,5 @@ const styles = StyleSheet.create({
     fontSize: 16, 
     fontWeight: 'bold', 
     textAlign: 'center' 
-  },
-  healthBarBg: {
-    position: 'absolute',
-    bottom: -10,
-    left: 0,
-    width: 60,
-    height: 4,
-    backgroundColor: '#333',
-    borderRadius: 2,
-  },
-  healthBarFill: {
-    height: '100%',
-    backgroundColor: '#FF0080',
-    borderRadius: 2,
-  },
-  attackIndicator: {
-    position: 'absolute',
-    top: -20,
-    fontSize: 20,
-  },
-  blockEffect: {
-    position: 'absolute',
-    top: -10,
-    left: -10,
-  },
-  blockText: {
-    fontSize: 24,
-  },
-  hitEffect: {
-    position: 'absolute',
-    zIndex: 999,
-  },
-  hitEffectText: {
-    fontSize: 32,
-  },
-  damageNumber: {
-    position: 'absolute',
-    zIndex: 999,
-  },
-  damageText: {
-    color: '#FF0080',
-    fontSize: 20,
-    fontWeight: 'bold',
-    textShadowColor: '#000',
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 2,
   },
 });
